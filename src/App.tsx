@@ -743,7 +743,7 @@ export default function App() {
           </div>
 
           <p className="text-xs text-[#9A9ABF]/70">
-            Made by <a href="https://dappit.io" target="_blank" rel="noopener" className="hover:text-white transition-colors">dappit.io</a>
+            Made by <Dinh Thuy>
           </p>
         </div>
       </footer>
