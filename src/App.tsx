@@ -285,7 +285,7 @@ function CreateGiftPanel({ onCreated }: { onCreated: (link: string) => void }) {
 
       {!CONTRACT_READY && (
         <p className="text-xs text-center mt-4 text-[#9A9ABF]">
-          Preview mode — the contract deploys from the chat. Wallet connect works now.
+          Every gift makes us happy.
         </p>
       )}
     </div>
