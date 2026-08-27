@@ -155,4 +155,4 @@ MIT
 
 ---
 
-<p align="center">Made by <a href="https://dappit.io">dappit.io</a></p>
+<p align="center">Made by DinhThuy
