@@ -10,7 +10,7 @@ import type { Abi, Address } from 'viem';
  * on-chain calls are gated so nothing fails until the contract goes live.
  */
 export const address: Address = '0x0000000000000000000000000000000000000000';
-export const chainId = 531050;
+export const chainId = 4441;
 export const CONTRACT_READY = address !== '0x0000000000000000000000000000000000000000';
 
 export const abi: Abi = (() => {
