@@ -77,7 +77,7 @@ The whole flow is driven by **two files** the platform rewrites automatically at
 
 ### To deploy
 
-> **Deploy the contract from the chat.** The platform compiles the ABI from `src/contract.ts`, deploys it to LitVM Testnet, then rewrites `src/contract.ts` and `src/wagmi.ts` with the live address and RPC. That's the entire process — there's no manual step on your side.
+> **Deploy the contract.** The platform compiles the ABI from `src/contract.ts`, deploys it to LitVM Testnet, then rewrites `src/contract.ts` and `src/wagmi.ts` with the live address and RPC. That's the entire process — there's no manual step on your side.
 
 Once deployed:
 
