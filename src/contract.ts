@@ -37,6 +37,13 @@ export const abi: Abi = (() => {
       // ---- Admin ----
       'function owner() view returns (address)',
       'function setOracle(address oracle)',
+
+      // ---- Events (used to recover giftId/rainId from tx receipts) ----
+      // NOTE: names/args here must match whatever the deployed contract actually
+      // emits. If they don't match, log decoding just fails silently and the
+      // app falls back to reading giftCount()/rainCount() instead — see App.tsx.
+      'event GiftCreated(uint256 indexed giftId, address indexed sender, address indexed recipient, uint8 giftType, uint256 amount, uint256 unlockTime)',
+      'event RainStarted(uint256 indexed rainId, address indexed sender, uint256 totalAmount, uint256 participants)',
     ]);
   } catch (e) {
     console.error('ABI parse failed — check signatures in src/contract.ts', e);
