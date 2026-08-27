@@ -8,8 +8,9 @@ import {
   useWriteContract,
   useWaitForTransactionReceipt,
 } from 'wagmi';
-import { formatUnits, parseEther, isAddress } from 'viem';
-import { chain } from './wagmi';
+import { formatUnits, parseEther, isAddress, parseEventLogs } from 'viem';
+import { readContract } from 'wagmi/actions';
+import { chain, config } from './wagmi';
 import { abi, address, CONTRACT_READY } from './contract';
 
 /* ============================================================
@@ -18,6 +19,17 @@ import { abi, address, CONTRACT_READY } from './contract';
 
 const short = (a?: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '');
 const fmtZkl = (v?: bigint) => (v == null ? '—' : Number(formatUnits(v, 18)).toLocaleString('en-US', { maximumFractionDigits: 4 }) + ' zkLTC');
+
+/* ---- Tiny hash router — no dependency needed for a single dynamic route ---- */
+function useHashRoute() {
+  const [hash, setHash] = useState(() => window.location.hash);
+  useEffect(() => {
+    const onHashChange = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+  return hash;
+}
 
 /* ---- Gift types ---- */
 const GIFT_TYPES = [
@@ -178,7 +190,8 @@ function CreateGiftPanel({ onCreated }: { onCreated: (link: string) => void }) {
   const [error, setError] = useState('');
 
   const { writeContract, data: hash, isPending, error: writeError } = useWriteContract();
-  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash });
+  const { isLoading: confirming, isSuccess, data: receipt } = useWaitForTransactionReceipt({ hash });
+  const [resolving, setResolving] = useState(false);
 
   const create = () => {
     setError('');
@@ -201,12 +214,48 @@ function CreateGiftPanel({ onCreated }: { onCreated: (link: string) => void }) {
     });
   };
 
-  // When confirmed, emit the shareable link
+  // When confirmed, recover the real on-chain giftId (never the tx hash) and
+  // build the claim link from that. Try decoding the GiftCreated event first;
+  // fall back to giftCount()-1 (this tx's own gift is always the latest one)
+  // if the event isn't present or doesn't decode.
   useEffect(() => {
-    if (isSuccess && hash) {
-      onCreated(`${window.location.origin}/#/claim/${hash}`);
-    }
-  }, [isSuccess, hash, onCreated]);
+    if (!isSuccess || !receipt) return;
+    let cancelled = false;
+
+    (async () => {
+      setResolving(true);
+      let giftId: bigint | null = null;
+
+      try {
+        const events = parseEventLogs({ abi, logs: receipt.logs, eventName: 'GiftCreated' });
+        if (events.length > 0) giftId = (events[0] as unknown as { args: { giftId: bigint } }).args.giftId;
+      } catch {
+        /* event missing or shape mismatch — fall through to the count fallback */
+      }
+
+      if (giftId == null) {
+        try {
+          const count = (await readContract(config, { abi, address, functionName: 'giftCount' })) as unknown as bigint;
+          if (count > 0n) giftId = count - 1n;
+        } catch {
+          /* contract not readable — nothing more we can do */
+        }
+      }
+
+      if (!cancelled) {
+        setResolving(false);
+        if (giftId != null) {
+          onCreated(`${window.location.origin}${window.location.pathname}#/claim/${giftId.toString()}`);
+        } else {
+          setError('Gift was created, but the gift ID could not be recovered. Check the transaction on the explorer.');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isSuccess, receipt, onCreated]);
 
   return (
     <div className="glass p-8">
@@ -279,8 +328,8 @@ function CreateGiftPanel({ onCreated }: { onCreated: (link: string) => void }) {
         </p>
       )}
 
-      <button className="btn-primary w-full" disabled={isPending || confirming} onClick={create}>
-        {isPending ? 'Confirm in wallet…' : confirming ? 'Creating gift…' : 'Create gift · ' + amount + ' zkLTC'}
+      <button className="btn-primary w-full" disabled={isPending || confirming || resolving} onClick={create}>
+        {isPending ? 'Confirm in wallet…' : confirming ? 'Creating gift…' : resolving ? 'Finalizing…' : 'Create gift · ' + amount + ' zkLTC'}
       </button>
 
       {!CONTRACT_READY && (
@@ -497,7 +546,7 @@ function OnChainState() {
   const stats = [
     { label: 'Gifts created', value: giftCount != null ? giftCount.toString() : '—', mono: true },
     { label: 'Rain events', value: rainCount != null ? rainCount.toString() : '—', mono: true },
-    { label: 'You received', value: fmtZkl(rained), mono: true },
+    { label: 'You received', value: fmtZkl(rained as bigint | undefined), mono: true },
   ];
 
   return (
@@ -508,6 +557,150 @@ function OnChainState() {
           <p className="font-mono text-2xl font-semibold gradient-text tabular-nums">{s.value}</p>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   Claim page — reached via #/claim/:giftId
+   ============================================================ */
+
+function ClaimGiftPage({ giftId }: { giftId: bigint }) {
+  const { address: account, isConnected, chainId } = useAccount();
+  const { connect, connectors, isPending: connecting, error: connectError } = useConnect();
+  const { switchChain } = useSwitchChain();
+  const onChain = isConnected && chainId === chain.id;
+
+  const { data: gift, isLoading, error: readError } = useReadContract({
+    abi,
+    address,
+    functionName: 'getGift',
+    args: [giftId],
+    query: { enabled: CONTRACT_READY },
+  });
+
+  const { writeContract, data: hash, isPending, error: writeError } = useWriteContract();
+  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash });
+
+  const [sender, recipient, giftType, amount, unlockTime, claimedOnChain] =
+    (gift as unknown as [string, string, number, bigint, bigint, boolean] | undefined) ?? [];
+
+  const unlockMs = unlockTime != null ? Number(unlockTime) * 1000 : null;
+  const isUnlocked = unlockMs != null ? Date.now() >= unlockMs : true;
+  const claimed = isSuccess || claimedOnChain;
+  const isRecipient = !!account && !!recipient && account.toLowerCase() === recipient.toLowerCase();
+  const typeInfo = GIFT_TYPES[giftType ?? -1];
+
+  const claim = () => {
+    writeContract({ abi, address, functionName: 'claimGift', args: [giftId] });
+  };
+
+  return (
+    <div className="min-h-screen bg-[#0A0A14] text-[#F4F4FF] bg-aurora relative">
+      <div className="bg-grid absolute inset-0 opacity-60 pointer-events-none" aria-hidden="true" />
+
+      <nav className="fixed top-0 inset-x-0 z-50 backdrop-blur-md bg-[#0A0A14]/80 border-b border-[#262640]/60">
+        <div className="max-w-6xl mx-auto px-5 sm:px-8 h-16 flex items-center justify-between">
+          <a href="#" className="flex items-center gap-3">
+            <Logo size={34} />
+            <span className="font-display font-bold text-lg tracking-tight">GiftPay</span>
+          </a>
+          {isConnected ? (
+            <span className="hidden sm:inline-flex items-center gap-2 text-xs font-mono text-[#9A9ABF] bg-[#141426] border border-[#262640] rounded-full px-3 py-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#34E5B0]" />
+              {short(account)}
+            </span>
+          ) : (
+            <button className="btn-primary !min-h-[36px] !px-5 !text-sm" disabled={connecting} onClick={() => connect({ connector: connectors[0] })}>
+              {connecting ? 'Connecting…' : 'Connect Wallet'}
+            </button>
+          )}
+        </div>
+      </nav>
+
+      <main className="px-5 sm:px-8 max-w-lg mx-auto pt-36 pb-24">
+        <div className="glass p-8">
+          <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#7C5CFF] mb-2">Gift #{giftId.toString()}</p>
+          <h1 className="font-display text-2xl font-semibold mb-6">Claim your gift 🎁</h1>
+
+          {!CONTRACT_READY && (
+            <p className="text-sm text-[#9A9ABF] mb-6">
+              This contract hasn't been deployed yet, so there's nothing to claim in preview mode.
+            </p>
+          )}
+
+          {CONTRACT_READY && isLoading && <p className="text-sm text-[#9A9ABF] mb-6">Loading gift…</p>}
+
+          {CONTRACT_READY && readError && (
+            <p className="text-sm mb-6" style={{ color: 'var(--error)' }}>
+              Couldn't find a gift with this ID. Double-check the link.
+            </p>
+          )}
+
+          {CONTRACT_READY && !!gift && (
+            <>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-[#9A9ABF] mb-1 font-semibold">Amount</p>
+                  <p className="font-mono text-xl font-semibold gradient-text">{fmtZkl(amount)}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-[#9A9ABF] mb-1 font-semibold">Type</p>
+                  <p className="text-sm font-semibold">{typeInfo ? `${typeInfo.icon} ${typeInfo.name}` : '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-[#9A9ABF] mb-1 font-semibold">From</p>
+                  <p className="font-mono text-sm">{short(sender)}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-[#9A9ABF] mb-1 font-semibold">Unlocks</p>
+                  <p className="text-sm">{isUnlocked ? 'Now' : new Date(unlockMs!).toLocaleString()}</p>
+                </div>
+              </div>
+
+              {claimed && (
+                <p className="text-sm mb-6" style={{ color: 'var(--success)' }}>
+                  This gift has already been claimed ✓
+                </p>
+              )}
+
+              {!claimed && account && !isRecipient && (
+                <p className="text-sm mb-6" style={{ color: 'var(--error)' }}>
+                  Connected wallet doesn't match this gift's recipient — the claim will likely revert.
+                </p>
+              )}
+
+              {!claimed && !isUnlocked && (
+                <p className="text-sm text-[#9A9ABF] mb-6">This gift isn't unlocked yet.</p>
+              )}
+
+              {(writeError || connectError) && (
+                <p className="text-sm mb-4" style={{ color: 'var(--error)' }}>
+                  {writeError ? 'Transaction rejected or reverted.' : 'No wallet detected — install MetaMask or Rabby to use GiftPay.'}
+                </p>
+              )}
+
+              {!isConnected ? (
+                <button className="btn-primary w-full" disabled={connecting} onClick={() => connect({ connector: connectors[0] })}>
+                  {connecting ? 'Connecting…' : 'Connect Wallet to claim'}
+                </button>
+              ) : !onChain ? (
+                <button className="btn-primary w-full" onClick={() => switchChain({ chainId: chain.id })}>
+                  Switch to {chain.name}
+                </button>
+              ) : (
+                <button className="btn-primary w-full" disabled={claimed || !isUnlocked || isPending || confirming} onClick={claim}>
+                  {isPending ? 'Confirm in wallet…' : confirming ? 'Claiming…' : claimed ? 'Claimed ✓' : 'Claim gift'}
+                </button>
+              )}
+            </>
+          )}
+
+          <a href="#" className="block text-center text-xs text-[#9A9ABF] mt-6 hover:text-white transition-colors">
+            ← Back to GiftPay
+          </a>
+        </div>
+      </main>
     </div>
   );
 }
@@ -525,10 +718,16 @@ export default function App() {
 
   const [giftLink, setGiftLink] = useState<string | null>(null);
   const claimRef = useRef<HTMLDivElement>(null);
+  const hash = useHashRoute();
 
   const onChain = isConnected && chainId === chain.id;
 
   const scrollToClaim = () => claimRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const claimMatch = hash.match(/^#\/claim\/(\d+)$/);
+  if (claimMatch) {
+    return <ClaimGiftPage giftId={BigInt(claimMatch[1])} />;
+  }
 
   return (
     <div className="min-h-screen bg-[#0A0A14] text-[#F4F4FF] bg-aurora relative">
@@ -743,7 +942,7 @@ export default function App() {
           </div>
 
           <p className="text-xs text-[#9A9ABF]/70">
-            Made by <Dinh Thuy>
+            Made by DinhThuy
           </p>
         </div>
       </footer>
